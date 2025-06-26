@@ -5,11 +5,26 @@ import numpy as np
 from flax import struct
 from functools import partial
 from typing import Optional, Tuple, Union, Any
-from gymnax.environments import environment, spaces
+import brax
 from brax import envs
 from brax.envs.wrappers.training import EpisodeWrapper, AutoResetWrapper
-import navix as nx
+import gymnax
+from gymnax.environments import environment, spaces
+from gymnax.environments.environment import Environment
+from gymnax.environments.spaces import Box
+from ml_collections import ConfigDict
+from mujoco_playground import MjxEnv, registry
+from mujoco_playground._src.wrapper import BraxAutoResetWrapper
 
+
+@struct.dataclass
+class LogEnvState:
+    env_state: environment.EnvState
+    episode_returns: float
+    episode_lengths: int
+    returned_episode_returns: float
+    returned_episode_lengths: int
+    timestep: int
 
 class GymnaxWrapper(object):
     """Base class for Gymnax wrappers."""
@@ -22,52 +37,79 @@ class GymnaxWrapper(object):
         return getattr(self._env, name)
 
 
-class FlattenObservationWrapper(GymnaxWrapper):
-    """Flatten the observations of the environment."""
+class MjxGymnaxWrapper(Environment):
+    def __init__(
+        self,
+        env_or_name: str | MjxEnv,
+        episode_length: int = 1000,
+        action_repeat: int = 1,
+        reward_scale: float = 1.0,
+        push_distractions: bool = False,
+        config: dict = None,
+    ):
+        if isinstance(env_or_name, str):
+            if config is None:
+                config = registry.get_default_config(env_or_name)
+                is_humanoid_task = env_or_name in [
+                    "G1JoystickRoughTerrain",
+                    "G1JoystickFlatTerrain",
+                    "T1JoystickRoughTerrain",
+                    "T1JoystickFlatTerrain",
+                ]
+                if is_humanoid_task:
+                    config.push_config.enable = push_distractions
+            else:
+                config = ConfigDict(config)
+            env = registry.load(env_or_name, config=config)
+            if episode_length is not None:
+                env = brax.envs.wrappers.training.EpisodeWrapper(
+                    env, episode_length, action_repeat
+                )
+                env = BraxAutoResetWrapper(env)
+            self.env = env
+        else:
+            self.env = env_or_name
+        self.reward_scale = reward_scale
+        super().__init__()
 
-    def __init__(self, env: environment.Environment):
-        super().__init__(env)
-
-    def observation_space(self, params) -> spaces.Box:
-        assert isinstance(
-            self._env.observation_space(params), spaces.Box
-        ), "Only Box spaces are supported for now."
-        return spaces.Box(
-            low=self._env.observation_space(params).low,
-            high=self._env.observation_space(params).high,
-            shape=(np.prod(self._env.observation_space(params).shape),),
-            dtype=self._env.observation_space(params).dtype,
+    def action_space(self, params):
+        return gymnax.environments.spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(self.env.action_size,),
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def reset(
-        self, key: chex.PRNGKey, params: Optional[environment.EnvParams] = None
-    ) -> Tuple[chex.Array, environment.EnvState]:
-        obs, state = self._env.reset(key, params)
-        obs = jnp.reshape(obs, (-1,))
+    def observation_space(self, params):
+        if isinstance(self.env.observation_size, int):
+            self.dict_obs = False
+            return Box(
+                low=-float("inf"),
+                high=float("inf"),
+                shape=(self.env.observation_size,),
+            )
+        else:
+            self.dict_obs = True
+            return Box(
+                low=-float("inf"),
+                high=float("inf"),
+                shape=self.env.observation_size["state"],
+            )
+
+    @property
+    def default_params(self) -> gymnax.EnvParams:
+        return gymnax.EnvParams()
+
+    def reset_env(self, key, params=None):
+        state = self.env.reset(key)
+        state.info["truncation"] = 0.0
+        obs = state.obs if not self.dict_obs else state.obs["state"]
         return obs, state
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(
-        self,
-        key: chex.PRNGKey,
-        state: environment.EnvState,
-        action: Union[int, float],
-        params: Optional[environment.EnvParams] = None,
-    ) -> Tuple[chex.Array, environment.EnvState, float, bool, dict]:
-        obs, state, reward, done, info = self._env.step(key, state, action, params)
-        obs = jnp.reshape(obs, (-1,))
-        return obs, state, reward, done, info
-
-
-@struct.dataclass
-class LogEnvState:
-    env_state: environment.EnvState
-    episode_returns: float
-    episode_lengths: int
-    returned_episode_returns: float
-    returned_episode_lengths: int
-    timestep: int
+    def step_env(self, key, state, action, params):
+        action = jnp.nan_to_num(action, 0.0)
+        state = self.env.step(state, action)
+        obs = state.obs if not self.dict_obs else state.obs["state"]
+        return obs, state, state.reward * self.reward_scale, state.done > 0.5, {}
 
 
 class LogWrapper(GymnaxWrapper):
@@ -143,31 +185,6 @@ class BraxGymnaxWrapper:
             low=-1.0,
             high=1.0,
             shape=(self._env.action_size,),
-        )
-
-class NavixGymnaxWrapper:
-    def __init__(self, env_name):
-        self._env = nx.make(env_name)
-
-    def reset(self, key, params=None):
-        timestep = self._env.reset(key)
-        return timestep.observation, timestep
-
-    def step(self, key, state, action, params=None):
-        timestep = self._env.step(state, action)
-        return timestep.observation, timestep, timestep.reward, timestep.is_done(), {}
-
-    def observation_space(self, params):
-        return spaces.Box(
-            low=self._env.observation_space.minimum,
-            high=self._env.observation_space.maximum,
-            shape=(np.prod(self._env.observation_space.shape),),
-            dtype=self._env.observation_space.dtype,
-        )
-
-    def action_space(self, params):
-        return spaces.Discrete(
-            num_categories=self._env.action_space.maximum.item() + 1,
         )
 
 

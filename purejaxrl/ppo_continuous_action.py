@@ -10,6 +10,7 @@ import distrax
 from wrappers import (
     LogWrapper,
     BraxGymnaxWrapper,
+    MjxGymnaxWrapper,
     VecEnv,
     NormalizeVecObservation,
     NormalizeVecReward,
@@ -73,7 +74,8 @@ def make_train(config):
     config["MINIBATCH_SIZE"] = (
         config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
-    env, env_params = BraxGymnaxWrapper(config["ENV_NAME"]), None
+    # env, env_params = BraxGymnaxWrapper(config["ENV_NAME"]), None
+    env, env_params = MjxGymnaxWrapper(config["ENV_NAME"]), None
     env = LogWrapper(env)
     env = ClipAction(env)
     env = VecEnv(env)
@@ -303,7 +305,7 @@ if __name__ == "__main__":
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
         "ACTIVATION": "tanh",
-        "ENV_NAME": "hopper",
+        "ENV_NAME": "HumanoidRun",
         "ANNEAL_LR": False,
         "NORMALIZE_ENV": True,
         "DEBUG": True,
